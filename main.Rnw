@@ -1,0 +1,702 @@
+\documentclass[12pt]{mwart}
+\usepackage[utf8]{inputenc}
+\usepackage{listings}
+\usepackage{mathtools, amsthm, amssymb}
+\usepackage[plmath]{polski}
+\usepackage[hidelinks]{hyperref}
+\usepackage{url}
+\date{\today}
+\title{Sprawozdanie 2}
+\author{Małgorzata Jakubik 262279, Kinga Jesionek 262328}
+<<echo=F, message=F, warning=F>>=
+pdf.options(encoding="CP1250")
+library(tidyverse)
+library(fpp3)
+library(ggplot2)
+library(itsmr)
+library(aTSA)
+library(forecast)
+library(ldsr)
+library(nortsTest)
+library(nortest)
+library(tseries)
+
+# Żeby xtable dobrze prezentowało daty:
+xtable <- function(x, ...) {
+   for (i in which(sapply(x, function(y) !all(is.na(match(c("POSIXt", "Date", "yearmonth"),class(y))))))) x[[i]] <- as.character(x[[i]])
+   xtable::xtable(x, ...)
+}
+
+# Wykres acf w ggplocie
+acf_ggplot <- function(data, lag.max=NULL, title="Empiryczna autokorelacja"){
+  raw.acf <- acf(data, plot = F, lag.max=lag.max) %>% with(data.frame(lag, acf))
+  raw.acf %>%
+    ggplot(aes(x=lag, y=acf)) +
+    geom_hline(yintercept = 0) +
+    geom_segment(aes(xend = lag, yend = 0)) +
+    ylab("ACF") +
+    geom_hline(
+      yintercept=qnorm(1 - 0.05/2)/sqrt(length(data)),
+      linetype="dashed", color = "red", size=0.3
+    ) +
+    geom_hline(
+      yintercept=-qnorm(1 - 0.05/2)/sqrt(length(data)),
+      linetype="dashed", color = "red", size=0.3
+    ) +
+    ggtitle(title) +
+    theme(plot.title = element_text(face="bold", hjust=0.5), plot.title.position = 'plot')
+}
+
+# Wykres pacf w ggplocie
+pacf_ggplot <- function(data, lag.max=NULL, title="Empiryczna częściowa autokorelacja"){
+  raw.acf <- pacf(data, plot = F, lag.max=lag.max) %>% with(data.frame(lag, acf))
+  raw.acf %>%
+    ggplot(aes(x=lag, y=acf)) +
+    geom_hline(yintercept = 0) +
+    geom_segment(aes(xend = lag, yend = 0)) +
+    ylab("PACF") +
+    geom_hline(
+      yintercept=qnorm(1 - 0.05/2)/sqrt(length(data)),
+      linetype="dashed", color = "red", size=0.3
+    ) +
+    geom_hline(
+      yintercept=-qnorm(1 - 0.05/2)/sqrt(length(data)),
+      linetype="dashed", color = "red", size=0.3
+    ) +
+    ggtitle(title) +
+    theme(plot.title = element_text(face="bold", hjust=0.5), plot.title.position = 'plot')
+}
+
+# transformacja Boxa-Coxa
+box_cox <- function(x, lambda){
+    if (lambda == 0){
+        log(x)
+    } else {
+        (sign(x) * abs(x)^lambda - 1) / lambda
+    }
+}
+
+@
+\begin{document}
+\maketitle
+\newpage
+
+\section{Wstęp}
+\subsection{Cel pracy}
+Celem poniższego raportu jest modelowanie wybranych danych rzeczywistych przy pomocy modelu ARMA i ocena jego dopasowania. Do przeprowadzenia analizy wykorzystałyśmy pakiet R.  
+\subsection{Informacje o danych}
+Zbiór danych użyty w poniższym raporcie zawiera informacje o miesięcznej liczbie pasażerów pewnej linii lotniczej na przestrzeni lat $1949$ - $1960$. W tym czasie zebrano 144 obserwacje. Dane dostępne są na platformie \href{https://www.kaggle.com/datasets/rakannimer/air-passengers?fbclid=IwAR0XSVGtBSUsvDNlpC3htTW3U6HKDGQCzu8JfRZuTt2YVz6dCQAL168opiM}{Kaggle}.
+
+\subsection{Wczytanie danych}
+<<echo=F, message=F, results="asis">>=
+df <- read.csv("AirPassengers.csv")
+df %>% head() %>% xtable(
+    caption="Wycinek sześciu pierwszych obserwacji w zbiorze danych wczytanym z pliku.",
+    label="tab:tab_1")
+@
+Przykładowe dane wczytane prosto z pliku przedstawiłyśmy w tabeli (\ref{tab:tab_1}). Możemy zauważyć, że oznaczenie miesiąca prezentowane jako napis jest niepoprawne w koncepcji zapisu dat w języku R (YYYY-MM-DD). Dodamy więc do każdego oznaczenia dzień, następnie przekonwertujemy typ na datę i finalnie na typ \texttt{yearmonth} z pakietu \texttt{tsibble}. Ze względu na to, że dane przedstawiają szereg czasowy, zapiszemy je w postaci obiektu danych \texttt{tsibble} z tego samego pakietu oraz dostosujemy nazwy zmiennych.
+
+<<echo=F, message=F, results="asis">>=
+df <- df %>% rename("Passengers" = X.Passengers) %>% mutate(Month = yearmonth(as.Date(paste(Month, "-01", sep=""))))
+df <- tsibble(Month = df["Month"][,1], "Passengers" = df["Passengers"][,1], index=Month)
+
+df %>% head() %>% xtable(
+    caption="Wycinek sześciu pierwszych obserwacji w zbiorze danych wczytanym z pliku po wstępnym dostosowaniu.",
+    label="tab:tab_2")
+@
+Efekt został przedstawiony w tabeli (\ref{tab:tab_2}) w postaci wycinka z danych.
+
+\subsection{Wizualizacja danych}
+<<fig_1, fig.cap="Wykres liczby pasażerów linii lotniczych w kolejnych miesiącach w latach 1949-1960.", echo=F, message=F>>=
+df %>% ggplot(aes(x=Month, y=Passengers)) + geom_line() +
+  ggtitle("Wykres liczby pasażerów linii lotniczych \n w kolejnych miesiącach w latach 1949-1960.") +
+  theme(plot.title = element_text(face="bold", hjust=0.5), plot.title.position = 'plot')
+@
+
+Na wykresie (\ref{fig:fig_1}) przedstawiłyśmy krzywą łączącą obserwacje z analizowanych danych. Na pierwszy rzut oka widzimy, że wśród danych występuje zarówno sezonowość, jak i trend. Możliwe jest również, że wśród danych wariancja nie jest stała. Wszystkie te obserwacje będą sprawdzane w dalszej części sprawozdania.
+
+\section{Przygotowanie danych do analizy}
+\subsection{Zbadanie jakości danych}
+W zbiorze danych dotyczącym miesięcznej liczby pasażerów linii lotniczej spodziewamy się, że nie uzyskamy wartości ujemnych ani niecałkowitych. Spodziewamy się również, że dostarczone dane będą o interwale miesięcznym. Przed spojrzeniem na dane trudnym do określenia jest, jakie wartości można potraktować jako podejrzanie duże. Biorąc pod uwagę, że dane dotyczą okresu po II wojnie światowej oraz, że pierwsze linie lotnicze powstawały na przestrzeni lat 20\dywiz{}tych XX wieku jesteśmy w stanie uwierzyć, że rozważana linia mogła istnieć. Natomiast biorąc pod uwagę statystyki teraźniejszych linii lotniczych, górną granicę wiarygodnej liczby jej pasażerów mogłybyśmy ustalić na liczbę rzędu kilkudziesięciu tysięcy.
+
+<<results="asis", echo=F, message=F>>=
+df %>%
+    data.frame() %>%
+    summarize(
+        "Liczba obserwacji" = n(),
+        "Wartość średnia" = mean(Passengers),
+        "Odchylenie standardowe" = sd(Passengers),
+        "Wartość największa" = max(Passengers),
+        "Mediana" = median(Passengers),
+        "Wartość najmniejsza" = min(Passengers),
+        "Liczba braków danych pasażerów" = sum(is.na(Passengers)),
+        "Liczba pominiętych miesięcy" = sum(
+            (df["Month"] %>% slice(1:length(df[["Month"]])-1)) !=
+                (df["Month"] %>% slice(2:length(df[["Month"]])))-1
+            ),
+        "Liczba ujemnych lub niecałkowitych wartości pasażerów" = sum(Passengers < 0) + 
+            sum(Passengers %/% 1 != Passengers)
+        ) %>% 
+    t() %>% 
+    xtable(
+        caption = "Wartości wyliczone w celu sprawdzenia jakości analizowanych danych.",
+        label = "tab:tab_3"
+        )
+@
+
+<<fig_2, fig.cap="Wykres pudełkowy rozproszenia liczby pasażerów pewnych linii lotniczych z analizowanych danych.", echo=F, message=F>>=
+df %>% ggplot(aes(y=Passengers)) + geom_boxplot() + coord_flip()  +
+  ggtitle("Wykres pudełkowy rozproszenia liczby pasażerów ") +
+  theme(plot.title = element_text(face="bold", hjust=0.5), plot.title.position = 'plot')
+@
+
+Żaden z opisanych wcześniej rodzajów błędów nie występuje w analizowanych przez nas danych. W zbiorze danych nie występują ujemne ani niecałkowite liczności pasażerów, nie ma braków danych ani pominiętych miesięcy oraz wszystkie miesiące ułożone są chronologicznie. Zakres wartości liczby pasażerów oraz jej odchylenie standardowe również są liczbami, w których prawdziwość jesteśmy w stanie uwierzyć. Wyniki wyliczeń, które posłużyły badaniu jakości analizowanych danych zestawiłyśmy w tabeli (\ref{tab:tab_3}). Wygenerowałyśmy również wykres pudełkowy (\ref{fig:fig_2}) rozproszenia wartości obserwacji, jednak obserwując wspomniany wykres nie znajdujemy obserwacji, które są istotnie odstające.
+
+\subsection{Wyodrębnienie obserwacji do zbioru testowego} \label{Wyodrębnienie}
+<<echo=F, message=F, warning=F>>=
+df_test<- df %>% filter(row_number() >= (n() - 17))
+df <- df %>% filter(row_number() < (n() - 17))
+@
+
+Do dalszej analizy zbiór danych podzieliłyśmy na dwie części. Wyodrębniłyśmy z danych zbiór treningowy składający się ze 126 obserwacji i zbiór testowy zawierający 18 obserwacji, który stanowi półtora roku. Model będzie dobierany dla zbioru treningowego, a predykowane przyszłe obserwacje zostaną porównane ze zbiorem testowym. 
+
+\subsection{Dekompozycja szeregu czasowego}
+\subsubsection{Wykresy ACF i PACF dla surowych danych}
+<<fig_3, fig.cap="Wykres autokorelacji szeregu czasowego liczby pasażerów pewnych linii lotniczych przed dekompozycją.", echo=F, message=F, warning=F>>=
+(df %>% select(Passengers))[["Passengers"]] %>% acf_ggplot(lag.max=100)
+@
+
+<<fig_4, fig.cap="Wykres częściowej autokorelacji szeregu czasowego liczby pasażerów pewnych linii lotniczych przed dekompozycją.", echo=F, message=F, warning=F>>=
+(df %>% select(Passengers))[["Passengers"]] %>% pacf_ggplot(lag.max=100)
+@
+
+Na wykresach (\ref{fig:fig_3}) i (\ref{fig:fig_4}) przedstawiłyśmy wartości odpowiednio funkcji autokorelacji oraz częściowej autokorelacji dla analizowanych danych przed dekompozycją. Empiryczna funkcja autokorelacji wyraża się wzorem  $$\hat{\rho} = \frac{\hat{\gamma}(h)}{\hat{\gamma}(0)},$$ gdzie $$\hat{\gamma}(h) = \frac{1}{n} \sum_{t=1}^{n-|h|} (X_{t+|h|} - \bar{x})(X_t - \bar{x}), \quad \bar{x} = \frac{1}{n} \sum_{i=1}^{n} x_i,$$ natomiast w celu wyznaczenia częściowej autokorelacji wykorzystałyśmy funkcję \texttt{pacf} dostępną w pakiecie R. Wykres autokorelacji mocno sugeruje, że w rozpatrywanym szeregu czasowym występują jakieś zależności. W kolejnych krokach spróbujemy je zidentyfikować oraz zniwelować. Wykres częściowej autokorelacji nie dostarcza nam tego rodzaju wątpliwości.
+
+\subsubsection{Test ADF weryfikujący hipotezę o niestacjonarności dla surowych danych}
+<<echo=F, message=F, warning=F, results='asis'>>=
+aTSA::adf.test((df %>% select(Passengers))[["Passengers"]], output=FALSE)[[1]] %>%
+  data.frame() %>% xtable(caption="Model liniowy pierwszego typu.", label = "tab:tab_4")
+@
+W celu weryfikacji hipotezy stacjonarności szeregu wykonałyśmy test ADF, czyli rozszerzony test Dickeya-Fullera. Test Dickey’a-Fullera weryfikuje obecność pierwiastka jednostkowego, jednak nie uwzględnia faktu, że składnik losowy równania $y_t = \rho y_{t-1} + \varepsilon_t$ może zawierać autokorelacje. Z tego względu wykonujemy jego rozszerzoną wersję. Korzystając z pakietu \texttt{aTSA} wykonujemy test ADF w trzech wariantach. Jako hipotezę zerową przyjmujemy, że dane są niestacjonarne. Pierwszy typ regresji testowej bez komponentów deterministycznych wyraża się wzorem
+$$\Delta y_t = \delta y_{t-1} + \sum_{i=1}^k \gamma_i \Delta y_{t-1} + \varepsilon_t.$$ Wyniki testu z zastosowaniem tego modelu zaprezentowałyśmy w tabeli (\ref{tab:tab_4}). Widzimy, że p\dywiz{}wartości są wysokie, nie ma zatem podstaw do odrzucenia hipotezy zerowej. Test wskazuje na niestacjonarność szeregu.
+
+<<echo=F, message=F, warning=F, results='asis'>>=
+aTSA::adf.test((df %>% select(Passengers))[["Passengers"]], output=FALSE)[[2]] %>%
+  data.frame() %>% xtable(caption="Model liniowy drugiego typu.", label = "tab:tab_5")
+@
+
+Drugi wariant testu uwzględnia występowanie dryfu w badanym szeregu. Do rozpatrywanego modelu regresji dodajemy wyraz wolny. Wyniki uzyskane po przeprowadzeniu tego wariantu testu znajdują się w tabeli (\ref{tab:tab_5}). Ponownie otrzymane p\dywiz{}wartości są większe niż poziom istotności, dlatego ponownie nie ma podstaw do odrzucenia hipotezy zerowej. Wynik testu wskazuje na niestacjonarność szeregu z dryfem.
+
+<<echo=F, message=F, warning=F, results='asis'>>=
+aTSA::adf.test((df %>% select(Passengers))[["Passengers"]], output=FALSE)[[3]] %>%
+  data.frame() %>% xtable(caption="Model liniowy trzeciego typu.", label = "tab:tab_6")
+@
+
+Ostatni już wariant testu uwzględnia komponenty deterministyczne takie jak wyraz wolny i trend liniowy. Wyniki znajdują się w tabeli (\ref{tab:tab_6}). Widzimy, że otrzymane wartości są mniejsze niż poziom istotności, dlatego odrzucamy hipotezę zerową. Możemy stwierdzić, że nie ma podstaw do odrzucenia hipotezy alternatywnej mówiącej o zmiennej stacjonarnej wokół trendu.
+
+\subsubsection{Identyfikacja trendów deterministycznych}
+<<echo=F, message=F, warning=F, fig.cap="\\label{fig:box_cox}Wykres przedstawiający szereg czasowy po zastosowaniu transformacji Boxa\\dywiz{}Coxa.">>=
+lambda <- df %>% features(Passengers, features = guerrero) %>% pull(lambda_guerrero)
+df <- df %>% mutate(Passengers.BC = box_cox(Passengers, lambda))
+
+# wykres danych po transformacie Boxa-Coxa
+df %>% ggplot(aes(x=Month, y=Passengers.BC)) + geom_line()  +
+  ggtitle("Wizualizacja danych po transformacji Boxa-Coxa") +
+  theme(plot.title = element_text(face="bold", hjust=0.5), plot.title.position = 'plot')
+@
+Aby uzyskać szereg stacjonarny w słabym sensie użyłyśmy transformacji Boxa\dywiz{}Coxa, która ma na celu ustabilizować wariancję w naszych danych. Transformacja Boxa\dywiz{}Coxa wyraża się wzorem $$w_t = \begin{cases}
+\log(y_t) \qquad \text{gdy} \quad \lambda = 0; \\
+\frac{(\operatorname{sign}(y_t)|y_t|^\lambda - 1)}{\lambda} \qquad \text{gdy} \quad \lambda \neq 0.
+\end{cases}$$ Na wykresie (\ref{fig:box_cox}) przedstawiony został szereg czasowy po zastosowaniu takiej transformacji.  
+
+Transformacja jednak nie zredukowała trendu i sezonowości. Dwukrotne zastosowanie różnicowania pomogło nam uzyskać szereg stacjonarny. Procedura ta została zastosowana dla kolejno jednego i dwunastu lagów. Zastosowane różnicowanie wyraża się wzorami $$\Delta y_t = y_t - y_{t-1}$$ $$\Delta y_t = y_t - y_{t-12}.$$ Wykonałyśmy je wykorzystując funkcję \texttt{diff}. Różnicowanie ma na celu usunięcie trendu i sezonowości, która odpowiada za liczbę pasażerów w poszczególnych miesiącach roku tak, aby uzyskać szereg stacjonarny w słabym sensie.
+<<echo=F, message=F, warning=F>>=
+### dekompozycja
+df <- df %>%
+    mutate(d_BC = Passengers.BC) %>%
+    mutate(d_BC = c(NA, diff(d_BC, lag=1, differences=1))) %>%
+    mutate(d_BC = c(NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA, diff(d_BC, lag=12)))
+
+decomposed_data <- (df %>% select(d_BC) %>% drop_na())[["d_BC"]]
+
+@
+
+\subsubsection{Wykresy ACF i PACF dla szeregu po dekompozycji}
+Po dokonaniu dekompozycji wykonałyśmy wykresy ACF i PACF, które są odpowiednio przedstawione na wykresach (\ref{fig:acf_dekomp}) i (\ref{fig:pacf_dekomp}). Wykresy nie wskazują na istnienie powtarzalności. Poza pojedynczymi przypadkami wartości nie wykraczają poza przedziały ufności. Obie funkcje zbiegają do zera. Wnioskujemy zatem, że dekompozycja została wykonana wystarczająco dobrze i szereg został stacjonarny. Zatem przeprowadzona dekompozycja umożliwia nam dobór modelu ARMA. 
+
+<<echo=F, message=F, warning=F, fig.cap="\\label{fig:acf_dekomp}Wykres autokorelacji szeregu czasowego liczby pasażerów pewnych inii lotniczych po dokompozycji.">>=
+decomposed_data %>% acf_ggplot(lag.max=100)
+@
+
+<<echo=F, message=F, warning=F,  fig.cap="\\label{fig:pacf_dekomp}Wykres częściowej autokorelacji szeregu czasowego liczby pasażerów pewnych inii lotniczych po dokompozycji.">>=
+decomposed_data %>% pacf_ggplot(lag.max=100)
+@
+
+\subsubsection{Test ADF weryfikujący hipotezę o niestacjonarności dla szeregu po dekompozycji}
+<<echo=F, message=F, warning=F, results='asis'>>=
+aTSA::adf.test(decomposed_data, output=FALSE)[[1]] %>%
+  data.frame() %>% xtable(caption="Model liniowy pierwszego typu.", label = "tab:1_adf")
+@
+
+<<echo=F, message=F, warning=F, results='asis'>>=
+aTSA::adf.test(decomposed_data, output=FALSE)[[2]] %>%
+  data.frame() %>% xtable(caption="Model liniowy drugiego typu.", label = "tab:2_adf")
+@
+
+<<echo=F, message=F, warning=F, results='asis'>>=
+aTSA::adf.test(decomposed_data, output=FALSE)[[3]] %>%
+  data.frame() %>% xtable(caption="Model liniowy trzeciego typu.", label = "tab:3_adf")
+@
+
+Wykonując test ADF po przeprowadzeniu dekompozycji spodziewamy się, że otrzymamy małe p{\dywiz}wartości i odrzucimy hipotezę zerową mówiącą o niestacjonarności. W tabelach (\ref{tab:1_adf}), (\ref{tab:2_adf}), (\ref{tab:3_adf}) zaprezentowałyśmy wyniki z przeprowadzonego testu w trzech wariantach. Widzimy, że każdy z nich wskazuje na to, że możemy odrzucić hipotezę zerową na rzecz hipotezy alternatywnej mówiącej o stacjonarności danych.
+
+\section{Modelowanie danych przy pomocy ARMA}
+\subsection{Dobranie rzędu modelu przy użyciu kryteriów informacyjnych}
+Dobór odpowiedniego rzędu modelu ARMA jest bardzo ważny. W tym celu korzysta się ze wskaźników dopasowania modelu. Wykorzystywanymi najpowszechniej wskaźnikami są Bayesowskie kryterium informacyjne (BIC) i kryterium informacyjne Akaikiego (AIC). Kryterium BIC obliczane jest przy pomocy wzoru $$BIC = -2\ln L + (p+q)\ln(n),$$ natomiast kryterium AIC przy pomocy $$AIC = -2\ln L + 2(p+q),$$gdzie $L$ to funkcja wiarogodności dla residuum. 
+Spośród uzyskiwanych wartości dla poszczególnych parametrów wybiera się parę parametrów, dla których wartość kryterium jest najmniejsza. BIC i AIC uzyskane dla naszego szeregu znajdują się odpowiednio na wykresach (\ref{fig:aic}) i (\ref{fig:bic}). Aby wybrać parametry $p$ i $q$ stworzyłyśmy tabele (\ref{tab:aic}) i (\ref{tab:bic}), które zawierają pięć najmniejszych wartości poszczególnych kryteriów informacyjnych.
+
+<<echo=F, message=F, warning=F, cache=T>>=
+### kryteria informacyjne
+criteria_aic_bic <- function(data, p_vec, q_vec){
+    df_criteria <- data.frame(P=p_vec) %>% full_join(data.frame(Q=q_vec), by=character()) %>% mutate(AIC=0, BIC=0)
+        for (p in p_vec){
+            for (q in q_vec){
+                model <- arima(data, order=c(p,0,q))
+                df_criteria <- df_criteria %>%
+                    mutate(
+                        AIC = replace(AIC, P == p & Q == q, AIC(model)),
+                        BIC = replace(BIC, P == p & Q == q, BIC(model))
+                    )
+        }
+    }
+    df_criteria
+}
+
+
+criteria <- criteria_aic_bic(decomposed_data, p=0:10, q=0:10) #długo się liczy
+
+# Najmniejsze wartości:
+# criteria %>% select(-BIC) %>%  arrange(AIC) %>% slice(1:5)
+# criteria %>% select(-AIC) %>% arrange(BIC) %>% slice(1:5)
+@
+
+<<echo=F, message=F, warning=F, results='asis'>>=
+
+criteria %>% select(-BIC) %>%  arrange(AIC) %>% slice(1:5) %>% xtable(
+    caption="Wycinek pięciu pierwszych par parametrów $p$ i $q$ z najmniejeszym AIC.",
+    label="tab:aic")
+
+@
+
+<<echo=F, message=F, warning=F, results='asis'>>=
+
+criteria %>% select(-AIC) %>% arrange(BIC) %>% slice(1:5) %>% xtable(
+    caption="Wycinek pięciu pierwszych par parametrów $p$ i $q$ z najmniejeszym BIC.",
+    label="tab:bic")
+
+@
+
+<<echo=F, message=F, warning=F, fig.cap="\\label{fig:aic}Kryterium informacyjne Akaikiego dla parametrów $p,q \\in [0,10] \\cup \\mathbb{N}.$">>=
+criteria %>%
+  mutate(Q = as.character(Q)) %>% arrange(P) %>%
+  ggplot(aes(x=P, y=AIC, group=Q, color=Q)) + geom_line() +
+  xlab("p") + ylab("AIC") +
+  ggtitle("Kryterium informacyjne AIC dla odpowiednich modeli ARMA(p,q).") +
+  theme(
+    plot.title = element_text(face="bold", hjust=0.5),
+    plot.title.position = 'plot',
+    axis.title.y = element_text(angle = 0, hjust=0.5, vjust=0.5)
+  ) +
+  scale_color_discrete(breaks=c("0",  "1",  "2",  "3",  "4",  "5",  "6",  "7",  "8",  "9",  "10")) +
+  scale_x_continuous(breaks=0:10) +
+  labs(colour = "q")
+@
+
+<<echo=F, message=F, warning=F, fig.cap="\\label{fig:bic}Bayesowskie kryterium informacyjne dla parametrów $p,q \\in [0,10] \\cup \\mathbb{N}.$">>=
+criteria %>%
+  mutate(Q = as.character(Q)) %>% arrange(P) %>%
+  ggplot(aes(x=P, y=BIC, group=Q, color=Q)) + geom_line() +
+  xlab("p") + ylab("BIC") +
+  ggtitle("Kryterium informacyjne BIC dla odpowiednich modeli ARMA(p,q).") +
+  theme(
+    plot.title = element_text(face="bold", hjust=0.5),
+    plot.title.position = 'plot',
+    axis.title.y = element_text(angle = 0, hjust=0.5, vjust=0.5)
+  ) +
+  scale_color_discrete(breaks=c("0",  "1",  "2",  "3",  "4",  "5",  "6",  "7",  "8",  "9",  "10")) +
+  scale_x_continuous(breaks=0:10) +
+  labs(colour = "q")
+@
+
+Na podstawie tabel (\ref{tab:aic}) i (\ref{tab:bic}) wybrałyśmy parametry modelu zaproponowane przez BIC. Otrzymujemy zatem szereg o $p=0$ i $q=1$, czyli uzykany został model średniej ruchomej MA(1).
+
+\subsection{Estymacja parametrów modelu wybraną metodą}
+Po wyborze rzędów modelu ARMA, można przejść do estymacji parametrów. Skorzystałyśmy z innowacyjnego algorytmu Hannana\dywiz{}Rissanena dostępnego w pakiecie \texttt{itsmr}.
+<<echo=F, message=F, warning=F>>=
+params <- hannan(decomposed_data, 0, 1)
+@
+Uzyskane parametry zostały zawarte w tabeli (\ref{params}).
+
+ \begin{table}
+  	\begin{center}\centering
+		\begin{tabular}{|c|c|}
+            \hline
+            & estymowany parametr\\
+            \hline
+            $\phi$ & \Sexpr{round(params$phi,6)}\\
+            \hline
+            $\theta$ & \Sexpr{round(params$theta,6)}\\
+            \hline
+            $\sigma^2$ & \Sexpr{round(params$sigma2,6)}\\
+            \hline
+		\end{tabular}
+	\end{center}
+    \caption{Estymowane parametry modelu ARMA(0, 1).}
+    \label{params}
+	\end{table}
+
+
+\section{Ocena dopasowania modelu}
+\subsection{Przedziały ufności dla ACF i PACF}
+<<echo=F, message=F, warning=F, cache=T>>=
+MC <- 1000
+alpha <- 0.05
+H <- seq(0, 100, 1)
+n <- length(decomposed_data)
+
+acf_est <- data.frame(H)
+pacf_est <- data.frame(H)
+
+# acf
+for (k in 1:MC){
+  X <- arima.sim(
+    model = list(order = c(0,0,1), ma = params$theta), 
+    n = length(decomposed_data), sd = sqrt(params$sigma2))
+  
+  g <- c()
+  for (h in H){
+    p <- 0
+    for (i in 1:(n-abs(h))){
+      p <- p + (X[i]-mean(X))*(X[i+abs(h)]-mean(X))
+    }
+    g <- append(g, 1/n*p)
+  }
+  g0 <- g[1]
+  acf_est[k] <- g/g0
+}
+
+A <- function(x) quantile(x,na.rm = T,probs = c(alpha/2,1-alpha/2))
+interval_acf <- data.frame(apply(acf_est[],1, A))
+@
+
+<<ci_acf, fig.cap="Wykres funkcji autokorelacji wzraz z przedziałami ufności.", echo=F, message=F, warning=F>>=
+decomposed_acf <- decomposed_data %>% acf(lag.max=100, plot=F) %>% with(data.frame(lag, acf))
+plot_acf_data <- interval_acf %>% t() %>% data.frame() %>% mutate(lag=0:100) %>% 
+  rename("ci_min"="X2.5.", "ci_max"="X97.5.") %>% 
+  inner_join(decomposed_acf, by="lag")
+
+tmp_plot <- ggplot(plot_acf_data) + 
+  geom_line(aes(x=lag, y=ci_min, colour='przedział \n ufności')) + 
+  geom_line(aes(x=lag, y=ci_max, colour='przedział \n ufności')) +
+  geom_segment(aes(x=lag, y=acf, xend = lag, yend = 0, colour='funkcja \n autokorelacji')) +
+  geom_hline(yintercept = 0) +
+  ylab("ACF") +
+  scale_colour_brewer(type = "seq", palette = "Set1") +
+  labs(colour="Legenda")+
+  ggtitle("Przedział ufności dla ACF") +
+  theme(plot.title = element_text(face="bold", hjust=0.5), plot.title.position = 'plot')
+
+tmp_plot
+@
+Dla wybranego przez nas modelu ARMA(0,1) z parametrem $\theta = \Sexpr{params$theta}$ symulacyjnie wyznaczyłyśmy przedziały ufności dla funkcji ACF za pomocą metody Monte Carlo. Wykonałyśmy 1000 kroków Monte Carlo i w każdym z nich policzyłyśmy empiryczną funkcję autokorelacji. Następnie dla każdego lagu wyznaczyłyśmy empiryczne kwantyle rzędu $\frac{\alpha}{2}$ i $1 - \frac{\alpha}{2}$ funkcji autokorelacji. Na wykresie (\ref{fig:ci_acf}) zaprezentowałyśmy empiryczną funkcję autokorelacji z danych po dekompozycji wraz z wyznaczonymi przedziałami ufności dla ACF. Obserwujemy pojedyncze wyjścia poza przedział ufności.
+
+<<echo=F, message=F, warning=F, cache=T>>=
+#pacf
+for (k in 1:MC){
+  X <- arima.sim(
+    model = list(order = c(0,0,1), ma = params$theta), 
+    n = length(decomposed_data), sd = sqrt(params$sigma2))
+  p <- pacf(X, lag.max=length(H), plot=F)
+  pacf_est[k] <- p$acf
+}
+
+interval_pacf <- data.frame(apply(pacf_est[],1, A))
+@
+
+<<ci_pacf, fig.cap="Wykres funkcji częściowej autokorelacji wzraz z przedziałami ufności.",echo=F, message=F, warning=F>>=
+decomposed_pacf <- decomposed_data %>% pacf(lag.max=100, plot=F) %>% with(data.frame(lag, acf))
+plot_pacf_data <- interval_pacf %>% t() %>% data.frame() %>% mutate(lag=0:100) %>% 
+  rename("ci_min"="X2.5.", "ci_max"="X97.5.") %>% 
+  inner_join(decomposed_pacf, by="lag")
+
+ggplot(plot_pacf_data) + 
+  geom_line(aes(x=lag, y=ci_min, colour='przedział \n ufności')) + 
+  geom_line(aes(x=lag, y=ci_max, colour='przedział \n ufności')) +
+  geom_segment(aes(x=lag, y=acf, xend = lag, yend = 0, colour='funkcja \n autokorelacji')) +
+  geom_hline(yintercept = 0) +
+  ylab("PACF") +
+  scale_colour_brewer(type = "seq", palette = "Set1") +
+  labs(colour="Legenda") +
+  ggtitle("Przedział ufności dla PACF") +
+  theme(plot.title = element_text(face="bold", hjust=0.5), plot.title.position = 'plot')
+@
+Podobną procedurę zastosowałyśmy do wyznaczenia przedziałów ufności dla empirycznej częściowej funkcji autokorelacji. Rezultaty widoczne są na rysunku (\ref{fig:ci_pacf}). Ponownie widzimy pojedyncze wyjścia poza przedział ufności. Obserwujemy też stopniowe wygaszanie się funkcji.
+
+\subsection{Porównanie linii kwantylowych z trajektorią}
+<<echo=F, message=F, warning=F, cache=TRUE>>=
+probs <- seq(0.1, 0.9, 0.1)
+Time <- 1:length(decomposed_data)
+X_MC <- data.frame(Time)
+
+for (k in 1:MC){
+  x <- arima.sim(
+    model = list(order = c(0,0,1), ma = params$theta), 
+    n = length(decomposed_data), sd = sqrt(params$sigma2))
+  X_MC[k] <- x
+}
+
+B <- function(x) quantile(x, na.rm = T, probs = probs)
+quantiles <- data.frame(apply(X_MC,1, B), row.names = c("one", "two", "three", "four", "five", "six", "seven", "eight", "nine"))
+
+data_to_quantiles <- data.frame(Time, decomposed_data)
+plot_quntile_data <- quantiles %>% t() %>% data.frame() %>% mutate(Time=Time) %>% 
+  inner_join(data_to_quantiles, by="Time")
+@
+
+<<kwantyle, fig.cap="Linie kwantylowe dla analizowanego szeregu czasowego.", echo=F, message=F, warning=F>>=
+ggplot(plot_quntile_data) + 
+  geom_line(aes(x=Time, y=one, colour='0.1')) + 
+  geom_line(aes(x=Time, y=two, colour='0.2')) +
+  geom_line(aes(x=Time, y=three, colour='0.3')) +
+  geom_line(aes(x=Time, y=four, colour='0.4')) +
+  geom_line(aes(x=Time, y=five, colour='0.5')) +
+  geom_line(aes(x=Time, y=six, colour='0.6')) +
+  geom_line(aes(x=Time, y=seven, colour='0.7')) +
+  geom_line(aes(x=Time, y=eight, colour='0.8')) +
+  geom_line(aes(x=Time, y=nine, colour='0.9')) +
+  geom_line(aes(x=Time, y=decomposed_data), color="black") +
+  ylab("Y(t)") +
+  labs(colour="Legenda") +
+  ggtitle("Linie kwantylowe dla analizowanego szeregu czasowego") +
+  theme(plot.title = element_text(face="bold", hjust=0.5), plot.title.position = 'plot')
+@
+
+<<echo=F, message=F, warning=F, results='asis'>>=
+t_quantiles <- quantiles %>% t() %>% data.frame()
+
+nine_one <- (length(decomposed_data) - sum((decomposed_data >= t_quantiles$nine) + (decomposed_data <= t_quantiles$one) == 1)) / length(decomposed_data)
+
+eight_two <- (length(decomposed_data) - sum((decomposed_data >= t_quantiles$eight) + (decomposed_data <= t_quantiles$two) == 1)) / length(decomposed_data)
+
+seven_three <- (length(decomposed_data) - sum((decomposed_data >= t_quantiles$seven) + (decomposed_data <= t_quantiles$three) == 1)) / length(decomposed_data)
+
+six_four <- (length(decomposed_data) - sum((decomposed_data >= t_quantiles$six) + (decomposed_data <= t_quantiles$four) == 1)) / length(decomposed_data)
+
+quantiles_df <- data.frame("kwantyle_od_0.9_do_0.1" = nine_one, "kwantyle_od_0.8_do_0.2" = eight_two, "kwantyle_od_0.7_do_0.3"= seven_three, "kwantyle_od_0.6_do_0.4"=six_four)
+
+quantiles_df %>% t() %>% as.data.frame() %>% mutate(spodziwane=c(0.8, 0.6, 0.4, 0.2)) %>% rename(uzyskane=V1) %>% xtable(caption="Procentowa część obserwacji w danym przedziale", label="tab:kwantyle")
+
+@
+
+W kolejnym kroku wygenerowałyśmy linie kwantylowe dla analizowanego szeregu czasowego wykonując 1000 kroków Monte Carlo. Wyniki widoczne są na rysunku (\ref{fig:kwantyle}) Dla wygenerowanych trajektorii modelu ARMA(0, 1) z parametrem $\theta = \Sexpr{params$theta}$ wyznaczyłyśmy decyle oraz sprawdziłyśmy, jaki procent danych mieści się w zadanych przedziałach. Traktując linie kwantylowe jako przedziały ufności dla trajektorii na poziomie $80\%, 60\%, 40\%$ oraz $20\%$ wyznaczyłyśmy faktyczny procent danych mieszczący się w danym przedziale. Wyniki zaprezentowałyśmy w tabeli (\ref{tab:kwantyle}). Każdy rozpatrywany odsetek danych zawiera się w rozpatrywanych decylowych przedziałach ufności.
+
+\subsection{Prognoza dla przyszłych obserwacji i porównanie z rzeczywistymi danymi}
+<<echo=F, message=F, warning=F, cache=T>>=
+y <- arima.sim(model = list(order = c(0,0,1), ma = params$theta), n = length(decomposed_data), sd = sqrt(params$sigma2))
+my_forecast <- forecast(y, level=95, h=18)
+
+low <- c(decomposed_data, as.numeric(my_forecast$lower))
+middle <- c(decomposed_data, as.numeric(my_forecast$mean))
+up <-  c(decomposed_data, as.numeric(my_forecast$upper))
+
+
+# cofnięcie różnicowania i BC
+undo_diff_BC <- function(decomposed_transformed_data){
+  transformed_data <- decomposed_transformed_data %>% 
+    diffinv(lag=12, xi=(df[["Passengers.BC"]] %>% diff(lag=1, differences=1))[1:12]) %>% 
+    diffinv(lag=1, xi=df[["Passengers.BC"]][1])
+  
+  data <- inv_boxcox(transformed_data, lambda=lambda)
+  data
+}
+
+
+df_pred <- data.frame(low=undo_diff_BC(low), middle=undo_diff_BC(middle), up=undo_diff_BC(up))
+msk <- as.logical(c(numeric(126), (numeric(18)+1)))
+
+df_pred <- df_pred %>% mutate(real_data = c(df[["Passengers"]], df_test[["Passengers"]]),
+                              Month=c(df[["Month"]], df_test[["Month"]]))
+
+@
+
+<<predykcje, fig.cap="Prognoza dla przyszłych obserwacji i porównanie z rzeczywistymi danymi.", echo=F, message=F, warning=F>>=
+df_pred %>% ggplot() + geom_line(aes(x=Month, y=real_data, colour="rzeczywiste \n dane")) +
+  geom_line(aes(x=df_pred[["Month"]],
+                y=c(rep_len(NaN, 126), df_pred[["middle"]][msk]),  colour="predykcja")) +
+  xlab("Data") +
+  ylab("Liczba pasażerów") +
+  scale_colour_brewer(type = "seq", palette = "Set1") +
+  labs(colour="Legenda") +
+  ggtitle("Prognoza dla przyszłych obserwacji") +
+  theme(plot.title = element_text(face="bold", hjust=0.5), plot.title.position = 'plot')
+@
+Następnym etapem była prognoza przyszłych obserwacji. Za pomocą wybranego modelu ARMA(0, 1) z parametrem $\theta = \Sexpr{params$theta}$ wykonałyśmy predykcję liczby pasażerów dla kolejnych 18 miesięcy i porównałyśmy ją z wartościami rzeczywistymi wyodrębnionymi z danych w sekcji \ref{Wyodrębnienie}. Do prognozowania użyłyśmy funkcji \texttt{forecast} z pakietu \texttt{forecast}. Funkcja ta zwróciła nam prognozowane wartości dla modelu ARMA, więc aby móc porównać otrzymane wartości z rzeczywistymi danymi wykonałyśmy operacje odwracające różnicowanie oraz transformacje Boxa-Coxa. W tym celu wykorzystałyśmy funkcję \texttt{diffinv} z pakietu \texttt{stats} oraz funkcję \texttt{inv\_boxcox} z pakietu \texttt{ldsr}. Wyniki zaprezentowałyśmy na rysunku (\ref{fig:predykcje}). Widzimy, że model bardzo dobrze poradził sobie z predykcją liczby pasażerów, jedynie przewidział zmianę wariancji większą niż była w rzeczywistości.
+
+\section{Weryfikacja założeń dotyczących szumu}
+Wartości resztowe modelu, czyli residua zostały zawarte na wykresie (\ref{fig:residua}). Uzyskałyśmy je poprzez odjęcie modelu ARMA z uzyskanymi parametrami od rzeczywistych danych po dekompozycji. W kolejnych krokach sprawdzone zostaną założenia dotyczące szumu.
+
+<<echo=F, message=F, warning=F>>=
+colors <- c("emp" = "Black", "teor" = "Red")
+set.seed(1)
+y <- arima.sim(model = list(order = c(0,0,1), ma = params$theta), n = length(decomposed_data), sd = sqrt(params$sigma2))
+
+residuals <- decomposed_data - y
+t <- seq(1, length(residuals), 1)
+residuals_df <-data.frame("residuals" = residuals, "t" = t)
+w <- seq(-0.055, 0.0697, 0.001)
+normal_df <- data.frame("x" = w, "dnorm"=dnorm(w, mean(residuals_df$residuals), sd(residuals_df$residuals)), "pnorm"=pnorm(w, mean(residuals_df$residuals), sd(residuals_df$residuals)))
+
+@
+
+
+<<echo=F, message=F, warning=F, fig.cap="\\label{fig:residua}Wykres residuów modelu.">>=
+ggplot(data = residuals_df, aes(x=t, y=residuals)) + 
+  geom_line() +
+  labs(x = "t", y="Residua", title="Wykres residuów")
+@
+
+\subsection{Założenie dotyczące średniej}
+<<echo=F, message=F, warning=F>>=
+mean <- mean(residuals_df$residuals)
+@
+Sprawdziłyśmy, czy wartość oczekiwana residuów wynosi 0. W tym celu obliczony został nieobciążony estymator wartości oczekiwanej, czyli średnia arytmetyczna. Dla próbki residuów wynosi ona \Sexpr{round(mean,6)}. Dodatkowo obserwując wykres (\ref{fig:residua}) zauważamy, że wartości residuów są bliskie zeru. Wartość średniej arytmetycznej jest na tyle mała, że można uznać, że założenie o zerowej wartości oczekiwanej jest spełnione.
+
+\subsection{Założenie dotyczące wariancji}
+<<echo=F, message=F, warning=F>>=
+variance <- var(residuals_df$residuals)
+@
+Zweryfikować należało także założenie o stałości wariancji, które często nazywa się założeniem homoskedastyczności. Wartość estymatora nieobciążonego dla wariancji próbki wynosi \Sexpr{round(variance, 6)}. Sprawdzimy, czy jest ona stała dla próbki. W tym celu skorzystamy z testu Arch, który w hipotezie zerowej przyjmuje założenie o homoskedastyczności danych. Wyniki tego testu zostały przedstawione w tabeli (\ref{arch}) i wskazują one na stałość wariancji residuów.
+<<echo=F, message=F, warning=F>>=
+#stałość wariancji
+arch <- arch.test(residuals_df$residuals)
+@
+ \begin{table}
+  	\begin{center}\centering
+		\begin{tabular}{|c|c|c|}
+            \hline
+            & statystyka testowa & p\dywiz wartość\\
+            \hline
+            Arch test & \Sexpr{round(arch$statistic,4)} & \Sexpr{arch$p.value}\\
+            \hline
+		\end{tabular}
+	\end{center}
+    \caption{Wyniki testu Arch.}
+    \label{arch}
+	\end{table}
+
+\subsection{Założenie dotyczące niezależności}
+Do zweryfikowania założenia o niezależności residuów posłużymy się wykresami ACF i PACF, które odpowiednio zawarte są na wykresach (\ref{fig:residua_acf}) i (\ref{fig:residua_pacf}). Zauważmy, że wartości na obu wspomnianych wykresach wykraczają poza przedziały. Na wykresach można dodatkowo doszukać się powtarzalności. Dodatkowo wykonany został test Ljunga\dywiz{}Boxa, wyniki tego testu zostały zawarte w tabeli (\ref{ljung}).  Uzyskana p\dywiz{}wartość wskazuje na fałszywość hipotezy zerowej, świadczącej o niezależności residuów. W rezultacie dochodzimy do wniosku, że wartości resztowe nie są niezależne.
+<<echo=F, message=F, warning=F, fig.cap="\\label{fig:residua_acf}Wykres autokorelacji residuów dla lagów od 0 do 100.">>=
+residuals_df$residuals %>% acf_ggplot(lag.max=100)
+@
+
+<<echo=F, message=F, warning=F, fig.cap="\\label{fig:residua_pacf}Wykres częściowej autokorelacji residuów dla lagów od 0 do 100.">>=
+residuals_df$residuals %>% pacf_ggplot(lag.max=100)
+@
+
+<<echo=F, message=F, warning=F>>=
+box_ljung <- Box.test(x = residuals_df$residuals, type = "Ljung") # p-wartość < 0.01 odrzucamy H0, czyli residua zależne
+@
+ \begin{table}
+  	\begin{center}\centering
+		\begin{tabular}{|c|c|c|}
+            \hline
+            & statystyka testowa & p\dywiz wartość\\
+            \hline
+            test Ljunga\dywiz{}Boxa & \Sexpr{round(box_ljung$statistic,4)} & \Sexpr{box_ljung$p.value}\\
+            \hline
+		\end{tabular}
+	\end{center}
+    \caption{Wyniki testu Ljunga\dywiz{}Boxa.}
+    \label{ljung}
+	\end{table}
+
+\subsection{Założenie dotyczące normalności rozkładu}
+Na koniec sprawdziłyśmy założenie o normalności residuów. W tym celu zostały przeprowadzone testy Shapiro\dywiz{}Wilka i Jarque\dywiz{}Bera, a uzyskane wyniki zostały umieszczone w tabeli (\ref{sw_jb}). Postanowiłyśmy wykonać wykres kwantylowy (\ref{fig:norm_kwantyle}), który porówna kwantyle między rozkładem normalnym a rozkładem residuów. Na wykresach (\ref{fig:norm_dyst}) i (\ref{fig:norm_gest}) porównane zostały odpowiednio dystrybuanty i gęstości z rozkładu normalnego z jego empirycznymi odpowiednikami. Na wykresie (\ref{fig:norm_hist}) widnieje histogram residuów z czerwoną linią odpowiadającą gęstości rozkładu normalnego.
+
+Na podstawie wyników uzyskanych w tabeli i wykresów dochodzimy do wniosku, że residua pochodzą z rozkładu normalnego. 
+
+%%\subsubsection{Analiza wykresu dystrybuanty}
+<<echo=F, message=F, warning=F, fig.cap="\\label{fig:norm_dyst}Wykres porównujący dystrubuantę residuów z dystrybuantą rozkładu normalnego.">>=
+ggplot(data=residuals_df, aes(x=residuals))+
+  stat_ecdf(aes(col='Empiryczna'))+
+  geom_line(data=normal_df, aes(x=x, y=pnorm, color = 'Teoretyczna'))+
+  scale_color_manual(name="",
+                     breaks=c('Empiryczna', 'Teoretyczna'),
+                     values=c('Empiryczna'='black', 'Teoretyczna'='red'))+
+  labs(x="t", y="", title="Dystrybuanta")+
+  theme(legend.title=element_text(size=10),
+        legend.text=element_text(size=10))
+@
+
+%%\subsubsection{Analiza wykresu gęstości}
+<<echo=F, message=F, warning=F, fig.cap="\\label{fig:norm_gest}Wykres porównujący gęstość residuów z gęstością rozkładu normalnego.">>=
+ggplot(data=residuals_df, aes(x=residuals))+
+  geom_density(aes(col='Empiryczna'))+
+  geom_line(data=normal_df, aes(x=x, y=dnorm, color = 'Teoretyczna'))+
+  scale_color_manual(name="",
+                     breaks=c('Empiryczna', 'Teoretyczna'),
+                     values=c('Empiryczna'='black', 'Teoretyczna'='red'))+
+  labs(x="t", y="", title="Gęstość")+
+  theme(legend.title=element_text(size=10),
+        legend.text=element_text(size=10))
+@
+
+<<echo=F, message=F, warning=F, fig.cap="\\label{fig:norm_hist}Hisogram residuów z gęstością rozkładu normalnego.">>=
+ggplot(data=residuals_df, mapping = aes(x=residuals))+
+  #geom_histogram( group = 1, bins=25)+
+  geom_histogram(bins = 25, aes(y=..density..))+
+  stat_function(fun = dnorm, args = list(mean = mean(residuals_df$residuals), sd = sd(residuals_df$residuals)), color="red")+
+  labs(x="t", y="", title="Histogram")
+
+@
+
+
+%%\subsubsection{Analiza wykresu kwantylowego}
+<<echo=F, message=F, warning=F, fig.cap="\\label{fig:norm_kwantyle}Wykres porównujący kwantyle residuów z kwantylami rozkładu normalnego.">>=
+ggplot(data=residuals_df, aes(sample=residuals)) + 
+  stat_qq_line(distribution = qnorm, color="red") +
+  stat_qq(color="Black")+
+  labs(x=element_blank(), y=element_blank(), title="Wykres kwantylowy", color="Legend")
+
+@
+
+%%\subsubsection{Testy na normalność rozkładu}
+<<echo=F, message=F, warning=F>>=
+sw <- shapiro.test(residuals_df$residuals)
+jb <- jarque.bera.test(residuals_df$residuals)
+@
+ \begin{table}
+  	\begin{center}\centering
+		\begin{tabular}{|c|c|c|}
+            \hline
+            test & statystyka testowa & p\dywiz wartość\\
+            \hline
+            Shapiro\dywiz{}Wilk & \Sexpr{round(sw$statistic,4)} & \Sexpr{sw$p.value}\\
+            \hline
+            Jarque\dywiz{}Bera & \Sexpr{round(jb$statistic,4)} & \Sexpr{jb$p.value}\\
+            \hline
+		\end{tabular}
+	\end{center}
+    \caption{Wyniki testów na normalność residuów.}
+    \label{sw_jb}
+	\end{table}
+
+\section{Zakończenie}
+\subsection{Podsumowanie}
+Podsumowując powyższy raport udało się zidentyfikować trendy deterministyczne występujące w danych dotyczących liczby pasażerów pewnej linii lotniczej na przestrzeni lat 1949-1959. Po dekompozycji uzyskałyśmy dane, na których przeprowadzone testy nie wskazały na niestacjonarność. Zbieżne wnioski uzyskałyśmy analizując wykresy funkcji ACF i PACF. Następnie przy pomocy kryteriów informacyjnych dobrałyśmy model ARMA(0, 1) oraz wykorzystując algorytm Hannana-Rissanena jego parametr $\theta=$\Sexpr{params$theta}. Wykonując wykresy funkcji ACF i PACF dla dobranego modelu nie zaobserwowałyśmy nieoczekiwanych zachowań tych funkcji. Poza pojedynczymi obserwacjami mieściły się one w wyznaczonych przedziałach ufności. Analizując linie kwantylowe dla szeregu czasowego widziałyśmy, że oczekiwana liczba obserwacji mieściła się w wyznaczonych przedziałach. Wykonując predykcje na kolejne 18 miesięcy otrzymałyśmy prognozowaną liczbę pasażerów w okresie 07.1959-12.1960, wyniki są zbieżne z rzeczywistymi danymi. 
+W analizie residuów okazało się, że spełnione są założenia dotyczące zerowej wartości oczekiwanej i stałej wariancji residuów. Nie spełnione natomiast jest założenie o niezależności. Dodatkowo, okazało się, że wartości resztowe pochodzą z rozkładu normalnego.
+\subsection{Wnioski}
+Możemy wnioskować, że dobrany model ARMA(0, 1) z parametrem $\theta=\Sexpr{params$theta}$ poprawnie opisuje szereg czasowy z analizowanych danych.
+
+\end{document}
